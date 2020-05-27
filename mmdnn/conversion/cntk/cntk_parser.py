@@ -116,6 +116,15 @@ class CntkParser(Parser):
         return True
 
 
+    def _conv_fuse_bias_node(self, source_node, new_source_nodename):
+        parameters = source_node.layer.parameters
+        if len(parameters) < 2:
+            return False
+        else:
+            self.set_weight(new_source_nodename, 'bias', parameters[1].asarray())
+            return True
+
+
     @staticmethod
     def _print_layer(source_node):
         print ("Layer: ", source_node.layer)
@@ -158,6 +167,10 @@ class CntkParser(Parser):
 
 
     def rename_Convolution(self, source_node):
+        if source_node.layer.is_block:
+            new_source_nodename = source_node.name + "_beforeblock"
+        else:
+            new_source_nodename = source_node.name
         IR_node = self._convert_identity_operation(source_node, new_op="Conv")
 
         for input in source_node.layer.inputs:
@@ -166,7 +179,7 @@ class CntkParser(Parser):
                 break
 
         W = self.channel_first_conv_kernel_to_IR(W)
-        self.set_weight(source_node.name, 'weights', W)
+        self.set_weight(new_source_nodename, 'weights', W)
 
         attributes = CntkParser._get_attribute(source_node.layer, 'strides')
 
@@ -182,9 +195,33 @@ class CntkParser(Parser):
         kwargs['auto_pad'] = 'SAME_LOWER' if padding[0] else 'VALID'
         kwargs['pads'] = self._convert_padding_to_IR(kwargs['kernel_shape'][:-2], padding)
 
-        kwargs['use_bias'] = self._fuse_bias_node(source_node)
+        # kwargs['use_bias'] = self._fuse_bias_node(source_node)
+        kwargs['use_bias'] = self._conv_fuse_bias_node(source_node, new_source_nodename)
 
         assign_IRnode_values(IR_node, kwargs)
+
+        if source_node.layer.is_block:
+            # Activation
+            activation = source_node.layer.block_root.owner.op_name
+            activation_IR_node = self.IR_graph.node.add()
+            if activation != 'ReLU':
+                raise ValueError()
+            IR_node.name = new_source_nodename
+
+            activation_IR_node.name = source_node.real_name
+            activation_IR_node.op = "Relu"
+            kwargs = {}
+            if hasattr(source_node.layer, 'dtype'):
+                assert source_node.layer.dtype in CntkParser.dtype_map, 'type [{}] is unknown.'.format(source_node.layer.dtype)
+                activation_IR_node.attr["dtype"].type = CntkParser.dtype_map[source_node.layer.dtype]
+            if hasattr(source_node.layer, 'shape'):
+                shape =  (-1,) + source_node.layer.shape
+                if True:
+                    shape = CntkParser.channel_first_shape_to_IR(shape)
+                shape = list_to_shape(shape)
+                kwargs['_output_shapes'] = [shape]
+            assign_IRnode_values(activation_IR_node, kwargs)
+            activation_IR_node.input.append(IR_node.name)
 
 
     def rename_ReLU(self, source_node):
